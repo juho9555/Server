@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>로봇 대시보드</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1 { color: #333; }
+        .topic { margin-bottom: 25px; padding: 10px; border: 1px solid #ddd; border-radius: 8px; background: #f9f9f9; }
+        pre { background: #eee; padding: 10px; border-radius: 4px; overflow-x: auto; }
+        .label { font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>로봇 대시보드 (실시간 WebSocket)</h1>
+
+    <!-- Map 토픽 -->
+    <div class="topic">
+        <h2>맵 정보</h2>
+        <pre id="map">/map 토픽 데이터를 기다리는 중...</pre>
+    </div>
+
+    <script>
+        const ws = new WebSocket("ws://192.168.0.53:8000/ws/realtime");
+
+        ws.onopen = () => {
+            console.log("WebSocket 연결됨");
+        };
+
+        ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            if (msg.topic === "map") {
+                const data = msg.data;
+
+                // 전체 맵 크기 (픽셀)
+                const width = data.width;
+                const height = data.height;
+
+                // 원점, 해상도
+                const resolution = data.resolution;
+                const origin = data.origin;
+
+                // 맵 전체 면적 (m²)
+                const totalWidthM = (width * resolution).toFixed(2);
+                const totalHeightM = (height * resolution).toFixed(2);
+                const totalArea = (totalWidthM * totalHeightM).toFixed(2);
+
+                // 탐지된 영역 비율 계산
+                const dataArray = data.data;
+                const detectedCells = dataArray.filter(v => v === 0 || v === 100).length;
+                const detectedPercent = (detectedCells / dataArray.length * 100).toFixed(1);
+
+                document.getElementById("map").textContent = 
+                    `가로: ${totalWidthM} m\n세로: ${totalHeightM} m\n총 면적: ${totalArea} m²\n탐지율: ${detectedPercent} %\n해상도: ${resolution} m\n원점: x=${origin.x}, y=${origin.y}, z=${origin.z}\n데이터 예시: [${data.data.slice(0,50).join(', ')} ...]`;
+            }
+        };
+
+        ws.onclose = () => {
+            console.log("WebSocket 연결 종료");
+        };
+    </script>
+</body>
+</html>
