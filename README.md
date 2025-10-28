@@ -175,4 +175,73 @@ async def websocket_endpoint(websocket: WebSocket):
             connected_clients.remove(websocket)
         print("Connection closed")
 ```
+
+웹 페이지 html
+```
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Real-time TurtleBot3 Map</title>
+    <style>
+        #mapContainer {
+            position: relative;
+            width: 600px;
+            height: 600px;
+        }
+        #mapImage {
+            width: 100%;
+            height: 100%;
+        }
+        #robot {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background: red;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+    </style>
+</head>
+<body>
+    <h2>Real-time TurtleBot3 Map</h2>
+    <div id="mapContainer">
+        <img id="mapImage" src="" alt="Map">
+        <div id="robot"></div>
+    </div>
+
+    <script>
+        const ws = new WebSocket("ws://192.168.0.57:8000/ws/realtime");
+        const robotEl = document.getElementById("robot");
+        const mapEl = document.getElementById("mapImage");
+
+        ws.onopen = () => console.log("WebSocket connected");
+
+        ws.onmessage = (event) => {
+            const msg = event.data;
+
+            // base64 map
+            if (msg.startsWith("data:image/png;base64,")) {
+                mapEl.src = msg;
+            } 
+            // odom / 위치 JSON
+            else {
+                try {
+                    const data = JSON.parse(msg);
+                    if (data.topic === "odom") {
+                        const x = data.data.x;
+                        const y = data.data.y;
+                        // 임의 좌표 변환 (맵 좌표계 맞춰서 적용 필요)
+                        robotEl.style.left = `${x * 50}px`;
+                        robotEl.style.top = `${y * 50}px`;
+                    }
+                } catch (e) {
+                    console.log("Failed to parse JSON:", e);
+                }
+            }
+        };
+    </script>
+</body>
+</html>
+```
 </details>
