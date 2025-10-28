@@ -104,3 +104,75 @@ async def websocket_endpoint(websocket: WebSocket):
 ```
 
 </details>
+
+<details>
+<summary>10.28
+</summary>
+  
+Mapping된 PGM파일을 PNG파일로 변환 후 websocket방식으로 웹에서 표시
+```
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+import json
+
+app = FastAPI()
+
+# CORS 허용
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+connected_clients = []
+
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
+
+@app.websocket("/ws/realtime")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    connected_clients.append(websocket)
+    print("WebSocket connected")
+    try:
+        while True:
+            try:
+                message = await websocket.receive_text()
+            except Exception as e:
+                print("Error receiving message from client:", e)
+                break
+
+            # 메시지가 JSON이면 구조화 데이터(odom 등)
+            try:
+                data = json.loads(message)
+                outgoing = json.dumps(data)
+            except:
+                # JSON 파싱 실패 → 그냥 문자열(map base64) 그대로 브로드캐스트
+                outgoing = message
+
+            # 브로드캐스트
+            remove_list = []
+            for client in connected_clients:
+                try:
+                    await client.send_text(outgoing)
+                except Exception as e:
+                    print("Failed to send to client:", e)
+                    remove_list.append(client)
+            for c in remove_list:
+                connected_clients.remove(c)
+
+    except WebSocketDisconnect:
+        print("WebSocket disconnected")
+    finally:
+        if websocket in connected_clients:
+            connected_clients.remove(websocket)
+        print("Connection closed")
+```
+</details>
