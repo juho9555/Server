@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Real-time TurtleBot3 Map</title>
+    <style>
+        #mapContainer {
+            position: relative;
+            width: 600px;
+            height: 600px;
+        }
+        #mapImage {
+            width: 100%;
+            height: 100%;
+        }
+        #robot {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background: red;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+    </style>
+</head>
+<body>
+    <h2>Real-time TurtleBot3 Map</h2>
+    <div id="mapContainer">
+        <img id="mapImage" src="" alt="Map">
+        <div id="robot"></div>
+    </div>
+
+    <script>
+        const ws = new WebSocket("ws://192.168.0.57:8000/ws/realtime");
+        const robotEl = document.getElementById("robot");
+        const mapEl = document.getElementById("mapImage");
+
+        ws.onopen = () => console.log("WebSocket connected");
+
+        ws.onmessage = (event) => {
+            const msg = event.data;
+
+            // base64 map
+            if (msg.startsWith("data:image/png;base64,")) {
+                mapEl.src = msg;
+            } 
+            // odom / 위치 JSON
+            else {
+                try {
+                    const data = JSON.parse(msg);
+                    if (data.topic === "odom") {
+                        const x = data.data.x;
+                        const y = data.data.y;
+                        const theta = data.data.theta;
+
+                        const scale = 50;   // 1m → 50px
+                        const offsetX = 300; // 중앙 X
+                        const offsetY = 400; // 중앙 Y
+
+                        // 좌표 변환
+                        const screenX = x * scale + offsetX;  // case B (x 반전)
+                        const screenY = y * scale + offsetY;  // case B (y 그대로)
+
+
+                        // 로봇 위치 이동
+                        robotEl.style.left = `${screenX}px`;
+                        robotEl.style.top = `${screenY}px`;
+
+                        // 방향 회전 (theta는 라디안, 시계 반전)
+                        robotEl.style.transform = `translate(-50%, -50%) rotate(${ -theta }rad)`;
+                    }
+                } catch (e) {
+                    console.log("Failed to parse JSON:", e);
+                }
+            }
+        };
+    </script>
+</body>
+</html>
