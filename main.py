@@ -1,122 +1,262 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-import json
-from PIL import Image
+import asyncio, time, roslibpy, base64, json
+import numpy as np
+import math
+import time
 
 app = FastAPI()
-
-# --- CORS 허용 ---
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# --- Static files ---
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-connected_clients = []
-map_info = None
-map_path = "static/save_4.png"  # 실제 맵 이미지 경로
+ROSBRIDGE_IP = "192.168.0.100"
+ros = roslibpy.Ros(host=ROSBRIDGE_IP, port=9090)
+ros.run()
+
+print("⏳ ROSBridge 연결 중...")
+while not ros.is_connected:
+    time.sleep(1)
+print("✅ ROSBridge 연결 성공!")
+
+# FastAPI 메인 루프 선언
+main_loop = asyncio.get_event_loop()
+
+latest_state = {"text": "대기 중"}
+
+# ============================================
+# ✅ ROS Subscriptions
+# ============================================
+amcl_topic = roslibpy.Topic(ros, "/amcl_pose", "geometry_msgs/PoseWithCovarianceStamped")
+map_topic  = roslibpy.Topic(ros, "/map", "nav_msgs/OccupancyGrid")
+batt_topic = roslibpy.Topic(ros, "/battery_state", "sensor_msgs/msg/BatteryState")
+
+latest_amcl, latest_map, latest_batt, prev_amcl_pos = None, None, None, None
+total_distance = 0.0 # 누적 이동 거리
+start_time = None # 순찰 시작 시간 (초기엔 None)
 
 
-# === 변환 함수 ===
-def transform_to_pixel(pose, map_info, map_image_path):
-    img = Image.open(map_image_path)
-    width, height = img.size
+def amcl_callback(msg):
+    global latest_amcl, prev_amcl_pos, total_distance
+    latest_amcl = msg
 
-    resolution = map_info.get("resolution", 0.05)
-    origin_x, origin_y, _ = map_info.get("origin", [0.0, 0.0, 0.0])
+    pos = msg["pose"]["pose"]["position"]
+    x, y = pos["x"], pos["y"]
 
-    x = pose.get("x", 0.0)
-    y = pose.get("y", 0.0)
+    # 이전 좌표와 비교해 거리 누적
+    if prev_amcl_pos is not None:
+        dx = x - prev_amcl_pos["x"]
+        dy = y - prev_amcl_pos["y"]
+        dist = math.sqrt(dx**2 + dy**2)
+        # 너무 작은 노이즈(로봇 흔들림)는 무시
+        if dist > 0.001:
+            total_distance += dist
 
-    # ROS 좌표 → 이미지 좌표 변환
-    px = (x - origin_x) / resolution
-    py = height - ((y - origin_y) / resolution)
+    prev_amcl_pos = {"x": x, "y": y}
 
-    # 범위 제한
-    px = max(0, min(width, px))
-    py = max(0, min(height, py))
-    return int(px), int(py)
+def map_callback(msg):   # OccupancyGrid
+    global latest_map
+    latest_map = msg
 
+def batt_callback(msg):  # BatteryState
+    global latest_batt
+    latest_batt = msg
 
-@app.get("/ping")
-async def ping():
-    return {"status": "ok"}
+amcl_topic.subscribe(amcl_callback)
+map_topic.subscribe(map_callback)
+batt_topic.subscribe(batt_callback)
 
+# ============================================
+# ✅ /cmd_vel 퍼블리셔 & 서브스크라이버
+# ============================================
+cmdvel_pub = roslibpy.Topic(ros, "/cmd_vel", "geometry_msgs/Twist")   # 🔸 추가됨
+cmdvel_sub = roslibpy.Topic(ros, "/cmd_vel", "geometry_msgs/Twist")
 
-# === WebSocket 메인 ===
+# ✅ 메인 루프 버전만 유지
+def cmdvel_callback(msg):
+    global latest_state, main_loop
+    lin = msg["linear"]["x"]
+    ang = msg["angular"]["z"]
+
+    if abs(lin) < 0.01 and abs(ang) < 0.01:
+        new_state = "정지"
+    elif abs(lin) > abs(ang):
+        new_state = "전진중" if lin > 0 else "후진중"
+    else:
+        new_state = "회전중"
+
+    if latest_state["text"] != new_state:
+        latest_state["text"] = new_state
+        for c in clients:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    c.send_json({"type": "state", "text": new_state}),
+                    main_loop
+                )
+            except Exception as e:
+                print("⚠️ 상태 전송 실패:", e)
+
+cmdvel_sub.subscribe(cmdvel_callback)
+
+# ============================================
+# ✅ /patrol 명령 퍼블리셔
+# ============================================
+patrol_pub = roslibpy.Topic(ros, "/patrol/cmd", "std_msgs/String")
+
+# ============================================
+# ✅ WebSocket 통신
+# ============================================
+clients = []
+
+async def broadcast(data: dict):
+    """모든 클라이언트에 브로드캐스트"""
+    dead = []
+    for ws in clients:
+        try:
+            await ws.send_json(data)
+        except:
+            dead.append(ws)
+    for d in dead:
+        if d in clients:
+            clients.remove(d)
+
 @app.websocket("/ws/realtime")
 async def websocket_endpoint(websocket: WebSocket):
-    global map_info
+    global total_distance, start_time
     await websocket.accept()
-    connected_clients.append(websocket)
-    print("✅ WebSocket connected")
+    clients.append(websocket)
+    print(f"✅ 클라이언트 연결됨 (총 {len(clients)}명)")
 
     try:
         while True:
+            # ---------------------------
+            # 1️⃣ 클라이언트 → ROS 명령
+            # ---------------------------
             try:
-                message = await websocket.receive_text()
-            except Exception as e:
-                print("Error receiving message from client:", e)
-                break
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=0.01)
+                data = json.loads(msg)
+                t = data.get("type")
 
-            # 1️⃣ JSON 데이터인 경우
-            try:
-                data = json.loads(message)
+                # 순찰 명령
+                if t == "patrol":
+                    action = data.get("action")
+                    if action == "single":
+                        patrol_pub.publish(roslibpy.Message({"data": "start_once"}))
+                        latest_state["text"] = "1회 순찰 중"
+                        start_time = time.time() # 순찰 시작 시간 기록
+                        total_distance = 0.0 # 거리 초기화
+                    elif action == "repeat":
+                        patrol_pub.publish(roslibpy.Message({"data": "start_repeat"}))
+                        latest_state["text"] = "반복 순찰 중"
+                        start_time = time.time() # 순찰 시작 시간 기록
+                        total_distance = 0.0
+                    elif action == "return":
+                        patrol_pub.publish(roslibpy.Message({"data": "return"}))
+                        latest_state["text"] = "복귀 중"
+                        start_time = None # 시간 멈춤
+                    elif action == "stop":
+                        patrol_pub.publish(roslibpy.Message({"data": "stop"}))
+                        latest_state["text"] = "정지"
+                        start_time = None # 시간 멈춤
+                        cmdvel_pub.publish(roslibpy.Message({
+                            "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
+                            "angular": {"x": 0.0, "y": 0.0, "z": 0.0}
+                        }))
+                    await broadcast({"type": "state", "text": latest_state["text"]})
 
-                # (1) YAML 정보 수신
-                if data.get("type") == "map_yaml":
-                    map_info = data["data"]
-                    print("📡 Received map YAML info:", map_info)
+                # 수동 조작
+                elif t == "cmd_vel":
+                    lin = float(data.get("linear", 0.0))
+                    ang = float(data.get("angular", 0.0))
+                    twist = {
+                        "linear": {"x": lin, "y": 0.0, "z": 0.0},
+                        "angular": {"x": 0.0, "y": 0.0, "z": ang}
+                    }
+                    cmdvel_pub.publish(roslibpy.Message(twist))
 
-                # (2) 로봇 좌표 수신 + 변환
-                elif data.get("type") == "robot_pose" and map_info:
-                    px, py = transform_to_pixel(data["data"], map_info, map_path)
-                    print(f"🧭 Robot pixel position: ({px}, {py})")
+            except asyncio.TimeoutError:
+                pass
 
-                    # 브라우저로 전송
-                    robot_pixel_msg = json.dumps({
-                        "topic": "robot_pixel",
-                        "data": {"px": px, "py": py}
-                    })
+            # ---------------------------
+            # 2️⃣ ROS → 클라이언트 데이터
+            # ---------------------------
+            await asyncio.sleep(0.2)
 
-                    # 연결된 모든 클라이언트에게 전송
-                    for client in connected_clients:
-                        try:
-                            await client.send_text(robot_pixel_msg)
-                        except Exception as e:
-                            print("Failed to send to client:", e)
-                            connected_clients.remove(client)
+            # AMCL
+            if latest_amcl:
+                pos = latest_amcl["pose"]["pose"]["position"]
+                ori = latest_amcl["pose"]["pose"]["orientation"]
+                siny_cosp = 2 * (ori["w"] * ori["z"] + ori["x"] * ori["y"])
+                cosy_cosp = 1 - 2 * (ori["y"] ** 2 + ori["z"] ** 2)
+                yaw = math.atan2(siny_cosp, cosy_cosp)
+                await websocket.send_json({
+                    "type": "amcl_pose",
+                    "x": pos["x"],
+                    "y": pos["y"],
+                    "yaw": yaw
+                })
 
-                # (3) 그 외 일반 JSON 데이터 (odom, tf 등)
-                else:
-                    outgoing = json.dumps(data)
-                    for client in connected_clients:
-                        try:
-                            await client.send_text(outgoing)
-                        except Exception as e:
-                            print("Failed to send to client:", e)
-                            connected_clients.remove(client)
+                await websocket.send_json({
+                    "type": "distance",
+                    "meters": round(total_distance, 2)
+                })
 
-            # 2️⃣ JSON 파싱 실패 → Base64 이미지(map) 같은 순수 문자열
-            except json.JSONDecodeError:
-                outgoing = message
-                for client in connected_clients:
-                    try:
-                        await client.send_text(outgoing)
-                    except Exception as e:
-                        print("Failed to send to client:", e)
-                        connected_clients.remove(client)
+            else:
+                await websocket.send_json({
+                    "type": "time",
+                    "minutes": 0.0
+                })
+
+            # 배터리
+            if latest_batt:
+                p = latest_batt.get("percentage", 0)
+                if p <= 1: p *= 100
+                await websocket.send_json({
+                    "type": "battery",
+                    "percentage": int(round(p, 1))
+                })
+
+            # 지도
+            if latest_map:
+                info = latest_map["info"]
+                data = latest_map["data"]
+                width, height = info["width"], info["height"]
+                res = info["resolution"]
+                origin = info["origin"]["position"]
+
+                arr = np.array(data, dtype=np.int8).reshape(height, width)
+                arr = np.flipud(arr)
+                gray = np.zeros_like(arr, dtype=np.uint8)
+                gray[arr == -1] = 205
+                gray[arr == 0] = 255
+                gray[arr > 0] = 0
+
+                await websocket.send_json({
+                    "type": "map",
+                    "width": width,
+                    "height": height,
+                    "res": res,
+                    "origin": {"x": origin["x"], "y": origin["y"]},
+                    "gray": gray.flatten().tolist()
+                })
+
+            # 상태
+            await websocket.send_json({
+                "type": "state",
+                "text": latest_state["text"]
+            })
 
     except WebSocketDisconnect:
-        print("❌ WebSocket disconnected")
-
+        print("❌ 클라이언트 연결 종료")
     finally:
-        if websocket in connected_clients:
-            connected_clients.remove(websocket)
-        print("🔌 Connection closed")
+        if websocket in clients:
+            clients.remove(websocket)
+
+@app.on_event("shutdown")
+def shutdown_event():
+    amcl_topic.unsubscribe()
+    batt_topic.unsubscribe()
+    map_topic.unsubscribe()
+    cmdvel_sub.unsubscribe()
+    cmdvel_pub.unadvertise()
+    patrol_pub.unadvertise()
+    ros.terminate()
+    print("🛑 ROSBridge 연결 종료")

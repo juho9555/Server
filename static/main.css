@@ -1,0 +1,87 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+
+body {
+  font-family: 'Inter', sans-serif;
+  background-color: #f1f5f9;
+}
+
+.dashboard-card {
+  background-color: #ffffff;
+  border-radius: 1rem;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, .1),
+              0 2px 4px -2px rgba(0, 0, 0, .06);
+  padding: 1.5rem;
+  transition: all .3s ease-in-out;
+}
+
+.metric-value {
+  font-size: 2.5rem;
+  font-weight: 800;
+  color: #1e3a8a;
+}
+
+.status-badge {
+  font-size: 1.8rem;
+  font-weight: 800;
+  padding: .75rem 1.25rem;
+  border-radius: .75rem;
+  display: inline-flex;
+  align-items: center;
+  min-width: 150px;
+  justify-content: center;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, .1);
+}
+
+#map-main, #video-main {
+  width: 100%;
+  transition: all .5s ease-in-out;
+  border-radius: 1rem;
+  overflow: hidden;
+  height: calc(100vh - 20rem);
+  min-height: 450px;
+}
+
+#map-small {
+  transition: all 0.3s ease;
+}
+#map-small:hover {
+  transform: scale(1.05);
+}
+
+#map-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated; /* 격자 보존(선명) */
+}
+
+.main-view-container {
+  height: calc(100vh - 12rem);
+  min-height: 500px;
+}
+
+.small-view {
+  position: absolute;
+  top: .5rem;
+  right: .5rem;
+  width: 150px;
+  height: 100px;
+  cursor: pointer;
+  z-index: 10;
+  border: 3px solid #60a5fa;
+  border-radius: .75rem;
+  box-shadow: 0 5px 10px rgba(0, 0, 0, .2);
+}
+
+.small-view:hover {
+  opacity: 1;
+  transform: scale(1.05);
+}
+
+.btn-action {
+  font-size: 1rem;
+  font-weight: 700;
+  padding: 1rem 1.25rem;
+  border-radius: .75rem;
+  transition: background-color .2s;
+}
